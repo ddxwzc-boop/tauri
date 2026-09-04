@@ -263,7 +263,7 @@ rm -rf package/src/main/ets package/dist  # 清理解压的生成文件
 
 ```bash
 # 检查关键功能代码是否包含
-tar -xzf <har_file> -O package/src/main/ets/webview/DefaultWebview.ets | grep -c "webPageSnapshot"
+tar -xzf <har_file> -O package/src/main/ets/plugins/webview/WebviewPlugin.ets | grep -c "webPageSnapshot"
 ```
 
 应返回 > 0。
