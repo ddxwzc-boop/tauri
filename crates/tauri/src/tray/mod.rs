@@ -406,6 +406,22 @@ impl<R: Runtime> TrayIconBuilder<R> {
       // On OHOS, TrayIcon::new dispatches the ArkTS bridge call to a dedicated
       // Rust worker thread (fire-and-forget), so the calling thread is never
       // blocked. We skip run_on_main_thread because no thread hop is needed.
+      //
+      // OHOS allows a single statusbar icon per ability: the tray-icon backend
+      // rejects building a new tray while another one is visible (explicit
+      // error instead of the old silent overwrite). The tauri-level API keeps
+      // its desktop-style "replace" semantics: hide every managed tray before
+      // building the new one. Hidden trays stay registered and can be shown
+      // again with set_visible(true) (which then reclaims the single slot).
+      for tray_id in app_handle.manager.tray.tray_ids() {
+        if let Some(existing) = app_handle.manager.tray.tray_by_id(app_handle, &tray_id) {
+          if let Err(e) = existing.set_visible(false) {
+            log::warn!(
+              "failed to hide existing tray icon {tray_id:?} before creating a new one: {e}"
+            );
+          }
+        }
+      }
       UnsafeSend(unsafe_builder.take().build()?)
     };
 

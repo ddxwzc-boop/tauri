@@ -1482,7 +1482,7 @@ impl<R: Runtime> App<R> {
   ///   }
   /// }
   /// ```
-  #[cfg(desktop)]
+  #[cfg(all(desktop, not(target_env = "ohos")))]
   #[deprecated(
     note = "When called in a loop (as suggested by the name), this function will busy-loop. To re-gain control of control flow after the app has exited, use `App::run_return` instead."
   )]

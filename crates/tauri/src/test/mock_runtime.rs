@@ -1327,14 +1327,17 @@ impl<T: UserEvent> Runtime<T> for MockRuntime {
 
   fn set_device_event_filter(&mut self, filter: DeviceEventFilter) {}
 
-  #[cfg(any(
-    target_os = "macos",
-    windows,
-    target_os = "linux",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd"
+  #[cfg(all(
+    not(target_env = "ohos"),
+    any(
+      target_os = "macos",
+      windows,
+      target_os = "linux",
+      target_os = "dragonfly",
+      target_os = "freebsd",
+      target_os = "netbsd",
+      target_os = "openbsd"
+    )
   ))]
   fn run_iteration<F: FnMut(RunEvent<T>)>(&mut self, callback: F) {}
 

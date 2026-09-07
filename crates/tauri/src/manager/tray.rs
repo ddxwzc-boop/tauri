@@ -45,6 +45,17 @@ impl<R: Runtime> TrayManager<R> {
       .push(Box::new(handler));
   }
 
+  /// IDs of all currently managed tray icons.
+  pub fn tray_ids(&self) -> Vec<TrayIconId> {
+    self
+      .icons
+      .lock()
+      .unwrap()
+      .iter()
+      .map(|(id, _)| id.clone())
+      .collect()
+  }
+
   pub fn tray_by_id<'a, I>(&self, app: &AppHandle<R>, id: &'a I) -> Option<TrayIcon<R>>
   where
     I: ?Sized,

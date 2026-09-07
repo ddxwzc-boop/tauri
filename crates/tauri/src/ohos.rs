@@ -12,7 +12,6 @@ pub mod openharmony_ability {
   pub use ::openharmony_ability::OpenHarmonyApp;
   pub use ::openharmony_ability::get_main_thread_env;
   pub use ::openharmony_ability::version;
-  pub use ::openharmony_ability::menu;
 }
 
 pub static APP: Mutex<Option<openharmony_ability::OpenHarmonyApp>> = Mutex::new(None);

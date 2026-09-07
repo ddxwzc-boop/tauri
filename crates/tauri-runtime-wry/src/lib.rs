@@ -61,7 +61,7 @@ use wry::WebViewBuilderExtIos;
 #[cfg(target_os = "macos")]
 use wry::WebViewBuilderExtMacos;
 #[cfg(target_env = "ohos")]
-use wry::WebViewBuilderExtOhos;
+use wry::{WebViewBuilderExtOhos, WebViewExtOhos};
 #[cfg(windows)]
 use wry::WebViewBuilderExtWindows;
 #[cfg(target_vendor = "apple")]
@@ -435,8 +435,8 @@ impl<T: UserEvent> Context<T> {
               window.inner.is_some()
             );
             if let Some(ref inner) = window.inner {
-              use tao::window::WindowExtOhos;
-              let id = inner.ohos_window_id();
+              use tao::platform::ohos::WindowExtOpenHarmony;
+              let id = inner.window_id();
               log::debug!("[WRY] CreateWindow callback: ohos_window_id={:?}", id);
               if let Some(id) = id {
                 *ohos_window_id_clone.lock().unwrap() = Some(id);
@@ -3309,8 +3309,8 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
     #[cfg(target_env = "ohos")]
     let ohos_window_id = {
       let id = window.inner.as_ref().and_then(|w| {
-        use tao::window::WindowExtOhos;
-        w.ohos_window_id()
+        use tao::platform::ohos::WindowExtOpenHarmony;
+        w.window_id()
       });
       Arc::new(std::sync::Mutex::new(id))
     };
@@ -3480,7 +3480,7 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
       .set_device_event_filter(DeviceEventFilterWrapper::from(filter).0);
   }
 
-  #[cfg(desktop)]
+  #[cfg(all(desktop, not(target_env = "ohos")))]
   fn run_iteration<F: FnMut(RunEvent<T>) + 'static>(&mut self, mut callback: F) {
     use tao::platform::run_return::EventLoopExtRunReturn;
     let windows = self.context.main_thread.windows.clone();
@@ -3545,7 +3545,7 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
     self.event_loop.run(event_handler)
   }
 
-  #[cfg(not(target_os = "ios"))]
+  #[cfg(all(not(target_os = "ios"), not(target_env = "ohos")))]
   fn run_return<F: FnMut(RunEvent<T>) + 'static>(mut self, callback: F) -> i32 {
     use tao::platform::run_return::EventLoopExtRunReturn;
 
@@ -3554,7 +3554,10 @@ impl<T: UserEvent> Runtime<T> for Wry<T> {
     self.event_loop.run_return(event_handler)
   }
 
-  #[cfg(target_os = "ios")]
+  // OHOS is callback-driven like iOS (the main thread must be returned to
+  // ArkTS): tao excludes run_return for OHOS, so alias it to `run` — same
+  // treatment as iOS below.
+  #[cfg(any(target_os = "ios", target_env = "ohos"))]
   fn run_return<F: FnMut(RunEvent<T>) + 'static>(self, callback: F) -> i32 {
     self.run(callback);
     0
@@ -4550,102 +4553,13 @@ fn handle_event_loop<T: UserEvent>(
     active_tracing_spans,
   } = context;
   // On non-OHOS platforms the close/destroy lifecycle is upstream-verbatim and
-  // never reads exit_state (OHOS-only ExitRequested dedup guard).
-  #[cfg(not(target_env = "ohos"))]
+  // never reads exit_state. On OHOS the pending close/status queues are drained
+  // by the tao OHOS backend itself (event_loop.rs synthesizes CloseRequested
+  // from drain_pending_window_closes and applies window status to its mirrors
+  // before each MainEvent dispatch) — no runtime-layer drain here anymore.
   let _ = exit_state;
   if *control_flow != ControlFlow::Exit {
     *control_flow = ControlFlow::Wait;
-  }
-
-  // OHOS: Process pending window close requests from ArkTS.
-  // ArkTS calls notifyWindowClose() synchronously (pushes OHOS window ID to Rust queue),
-  // then calls destroyWindow() asynchronously (returns a Promise). The drain runs
-  // synchronously at the start of the next Rust event loop iteration, reading from
-  // stored Rust values before the async destruction completes. See defensive guard
-  // on wrapper.inner below.
-  //
-  // NOTE (known-issue #1, partially remediated): tao WindowId now carries the
-  //   real OHOS window id (the ZST deficiency was fixed — see openspec change
-  //   p1-window-state-per-window-rect Phase 3). This drain bypass is still
-  //   required: Float subwindow close goes through ArkTS destroyWindow → this
-  //   queue and produces no MainEvent::WindowDestroy (that event only fires
-  //   when the main window stage is torn down). Root-cause analysis:
-  //   doc/OHOS窗口遗留问题.md (issue 1).
-  #[cfg(target_env = "ohos")]
-  {
-    use tao::platform::ohos::WindowExtOpenHarmony;
-    let pending_closes = tao::platform::ohos::ability::drain_pending_window_closes();
-    for ohos_win_id in pending_closes {
-      // Find the Tauri WindowId matching this OHOS window ID.
-      // Defensive: wrapper.inner may be None if the OHOS native window was already
-      // destroyed by ArkTS destroyWindow(). In that case, window_id() is unavailable,
-      // so we skip this entry — the TaoWindowEvent::Destroyed handler (if fired)
-      // will process the lifecycle via on_window_close (idempotent).
-      let matching_id = windows.0.borrow().iter().find_map(|(id, wrapper)| {
-        wrapper
-          .inner
-          .as_ref()
-          .and_then(|w| w.window_id())
-          .and_then(|wid| {
-            if wid == ohos_win_id as i64 {
-              Some(*id)
-            } else {
-              None
-            }
-          })
-      });
-      if let Some(window_id) = matching_id {
-        on_close_requested_ohos(callback, window_id, windows.clone(), exit_state.clone());
-      } else {
-        log::debug!(
-          "[wry] OHOS pending close: no matching Tauri window for OHOS window ID {}",
-          ohos_win_id
-        );
-      }
-    }
-
-    // Feed system window status back into the tao mirror state (known-issue #5,
-    // §5.3). windowStatusChange events are enqueued via the notify_window_status
-    // NAPI call; drained here and routed by real OHOS windowId to the matching
-    // tao Window, whose apply_window_status updates the visible/fullscreen
-    // mirror. Routing mirrors drain_pending_window_closes above (does not rely
-    // on the tao ZST WindowId; correct for multiple windows). Details:
-    // doc/OHOS窗口遗留问题.md (issue 5, §5.3).
-    let pending_status = tao::platform::ohos::ability::drain_pending_window_status();
-    for (ohos_win_id, status) in pending_status {
-      let applied = windows.0.borrow().iter().find_map(|(_id, wrapper)| {
-        let w = wrapper.inner.as_ref()?;
-        if w.window_id() == Some(ohos_win_id as i64) {
-          w.apply_window_status(status);
-          Some(())
-        } else {
-          None
-        }
-      });
-      if applied.is_none() {
-        // G6 / cross-cutting (tao#20): a failed Float window has window_id=None
-        // (ohos_win_id() == 0) — it matches no drained status and produces no
-        // status events (no real OHOS window), so its mirror stays silently
-        // stale. A drained-but-unmatched status therefore means either a real
-        // window (id != 0) destroyed between enqueue and drain (stale id) or a
-        // routing mismatch. Non-zero ids are diagnosable stale ids → warn;
-        // id == 0 (main window / failed-Float sentinel) stays at debug to
-        // avoid noise.
-        if ohos_win_id != 0 {
-          log::warn!(
-            "[wry] OHOS pending status drained but no matching window for id {} (status={}); \
-             stale id (window destroyed between queue and drain) or routing mismatch \
-             (failed Float windows never match: window_id=None)",
-            ohos_win_id, status
-          );
-        } else {
-          log::debug!(
-            "[wry] OHOS pending status: no match for id 0 (main window / failed-Float sentinel), status={}",
-            status
-          );
-        }
-      }
-    }
   }
 
   match event {

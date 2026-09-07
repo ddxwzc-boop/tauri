@@ -534,7 +534,7 @@ pub trait Runtime<T: UserEvent>: Debug + Sized + 'static {
   fn set_device_event_filter(&mut self, filter: DeviceEventFilter);
 
   /// Runs an iteration of the runtime event loop and returns control flow to the caller.
-  #[cfg(desktop)]
+  #[cfg(all(desktop, not(target_env = "ohos")))]
   fn run_iteration<F: FnMut(RunEvent<T>) + 'static>(&mut self, callback: F);
 
   /// Equivalent to [`Runtime::run`] but returns the exit code instead of exiting the process.
