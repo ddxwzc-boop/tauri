@@ -60,6 +60,13 @@ pub fn current_binary(_env: &Env) -> std::io::Result<PathBuf> {
 /// See [`current_binary`] for platform specific behavior, and
 /// [`tauri_utils::platform::current_exe`] for possible security implications.
 ///
+/// # Platform-specific behavior
+///
+/// ## OpenHarmony
+///
+/// There is no process relaunch on OHOS: this function exits with code 0 and
+/// lets the OS restart the app through the ability lifecycle.
+///
 /// # Examples
 ///
 /// ```rust,no_run
@@ -72,20 +79,64 @@ pub fn current_binary(_env: &Env) -> std::io::Result<PathBuf> {
 ///   });
 /// ```
 pub fn restart(env: &Env) -> ! {
-  use std::process::{exit, Command};
+  #[cfg(target_env = "ohos")]
+  {
+    use openharmony_ability_plugin_app_control::AppControlExt;
 
-  if let Ok(path) = current_binary(env) {
-    // on macOS on updates the binary name might have changed
-    // so we'll read the Contents/Info.plist file to determine the binary path
-    #[cfg(target_os = "macos")]
-    restart_macos_app(&path, env);
+    let _ = env;
+    // OHOS restart uses the official `ApplicationContext.restartApp` (API 12+)
+    // through the app-control MainThreadSync bridge: it kills all of the app's
+    // processes and relaunches the current UIAbility. A bare
+    // `std::process::exit` does NOT relaunch — verified on device, the OS keeps
+    // the process dead — so it is only the failure fallback.
+    let restart_error: Option<String> = (|| -> Result<(), String> {
+      let app_guard = crate::ohos::APP
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+      let app = app_guard
+        .as_ref()
+        .ok_or_else(|| "OpenHarmonyApp not initialized".to_string())?;
+      let env_cell = crate::ohos::openharmony_ability::get_main_thread_env();
+      let env_ref = env_cell.borrow();
+      let env = env_ref
+        .as_ref()
+        .ok_or_else(|| "main thread N-API Env not available".to_string())?;
+      app
+        .restart(env)
+        .map_err(|e| format!("restartApp bridge call failed: {e}"))
+    })()
+    .err();
 
-    if let Err(e) = Command::new(path).args(env.args_os.iter().skip(1)).spawn() {
-      log::error!("failed to restart app: {e}");
+    if let Some(e) = restart_error {
+      log::error!("[tauri] OHOS restartApp failed: {e} — falling back to process exit");
+      std::process::exit(0);
+    }
+
+    // restartApp accepted: the ability runtime is killing and relaunching this
+    // process. Never return — let the runtime perform the teardown (a racing
+    // local exit could interfere with the restart handshake).
+    loop {
+      std::thread::sleep(std::time::Duration::MAX);
     }
   }
 
-  exit(0);
+  #[cfg(not(target_env = "ohos"))]
+  {
+    use std::process::{exit, Command};
+
+    if let Ok(path) = current_binary(env) {
+      // on macOS on updates the binary name might have changed
+      // so we'll read the Contents/Info.plist file to determine the binary path
+      #[cfg(target_os = "macos")]
+      restart_macos_app(&path, env);
+
+      if let Err(e) = Command::new(path).args(env.args_os.iter().skip(1)).spawn() {
+        log::error!("failed to restart app: {e}");
+      }
+    }
+
+    exit(0);
+  }
 }
 
 #[cfg(target_os = "macos")]

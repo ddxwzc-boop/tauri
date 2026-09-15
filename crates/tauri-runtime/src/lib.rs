@@ -442,23 +442,32 @@ pub trait Runtime<T: UserEvent>: Debug + Sized + 'static {
   fn new(args: RuntimeInitArgs) -> Result<Self>;
 
   /// Creates a new webview runtime on any thread.
-  #[cfg(any(
-    windows,
-    target_os = "linux",
-    target_os = "dragonfly",
-    target_os = "freebsd",
-    target_os = "netbsd",
-    target_os = "openbsd"
-  ))]
-  #[cfg_attr(
-    docsrs,
-    doc(cfg(any(
+  ///
+  /// Not available on OHOS: the event loop must live on the ArkTS main
+  /// thread, so `Builder::any_thread` is not exposed there.
+  #[cfg(all(
+    any(
       windows,
       target_os = "linux",
       target_os = "dragonfly",
       target_os = "freebsd",
       target_os = "netbsd",
       target_os = "openbsd"
+    ),
+    not(target_env = "ohos")
+  ))]
+  #[cfg_attr(
+    docsrs,
+    doc(cfg(all(
+      any(
+        windows,
+        target_os = "linux",
+        target_os = "dragonfly",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd"
+      ),
+      not(target_env = "ohos")
     )))
   )]
   fn new_any_thread(args: RuntimeInitArgs) -> Result<Self>;
@@ -534,7 +543,7 @@ pub trait Runtime<T: UserEvent>: Debug + Sized + 'static {
   fn set_device_event_filter(&mut self, filter: DeviceEventFilter);
 
   /// Runs an iteration of the runtime event loop and returns control flow to the caller.
-  #[cfg(all(desktop, not(target_env = "ohos")))]
+  #[cfg(desktop)]
   fn run_iteration<F: FnMut(RunEvent<T>) + 'static>(&mut self, callback: F);
 
   /// Equivalent to [`Runtime::run`] but returns the exit code instead of exiting the process.
