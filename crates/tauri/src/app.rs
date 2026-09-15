@@ -43,9 +43,42 @@ use tauri_utils::{assets::AssetsIter, PackageInfo};
 /// can call `do_restart(env)` without caring about the platform.
 #[cfg(target_env = "ohos")]
 fn do_restart(_env: &crate::Env) -> ! {
-  // OHOS restart: the legacy TSFN-based restart helper was removed during decoupling.
-  // Process exit triggers the OHOS ability lifecycle restart via the OS.
-  std::process::exit(0);
+  use openharmony_ability_plugin_app_control::AppControlExt;
+
+  // OHOS restart uses the official `ApplicationContext.restartApp` (API 12+)
+  // through the app-control MainThreadSync bridge: it kills all of the app's
+  // processes and relaunches the current UIAbility. A bare
+  // `std::process::exit` does NOT relaunch — verified on device, the OS keeps
+  // the process dead — so it is only the failure fallback.
+  let restart_error: Option<String> = (|| -> Result<(), String> {
+    let app_guard = crate::ohos::APP
+      .lock()
+      .unwrap_or_else(|e| e.into_inner());
+    let app = app_guard
+      .as_ref()
+      .ok_or_else(|| "OpenHarmonyApp not initialized".to_string())?;
+    let env_cell = crate::ohos::openharmony_ability::get_main_thread_env();
+    let env_ref = env_cell.borrow();
+    let env = env_ref
+      .as_ref()
+      .ok_or_else(|| "main thread N-API Env not available".to_string())?;
+    app
+      .restart(env)
+      .map_err(|e| format!("restartApp bridge call failed: {e}"))
+  })()
+  .err();
+
+  if let Some(e) = restart_error {
+    log::error!("[tauri] OHOS restartApp failed: {e} — falling back to process exit");
+    std::process::exit(0);
+  }
+
+  // restartApp accepted: the ability runtime is killing and relaunching this
+  // process. Never return — let the runtime perform the teardown (a racing
+  // local exit could interfere with the restart handshake).
+  loop {
+    std::thread::sleep(Duration::MAX);
+  }
 }
 
 /// Platform-specific restart implementation.
@@ -2348,6 +2381,18 @@ tauri::Builder::default()
           .expect("OpenHarmony app instance not initialized");
         crate::ohos::BASE_PATH.set(ohos_app.base_path()).ok();
         crate::ohos::MODULE_NAME.set(ohos_app.module_name()).ok();
+        // Register the Rust-side app-control bridge plugin (id="ohos.app-control").
+        // tao's exit chain (ControlFlow::Exit → LoopDestroyed → terminate →
+        // ProcessManager.exit) and do_restart (ApplicationContext.restartApp) both
+        // call it through the MainThreadSync bridge; without this Rust-side
+        // declaration the ArkTS configurePlugins flow never installs it and every
+        // terminate/restart fails with "Bridge plugin 'ohos.app-control' is not
+        // installed for '<module>'" (found during issue #100 device verification).
+        if let Err(e) =
+          ohos_app.register_plugin(openharmony_ability_plugin_app_control::AppControlBridgePlugin)
+        {
+          log::error!("[tauri] failed to register AppControlBridgePlugin: {e}");
+        }
         #[cfg(feature = "tray-icon")]
         {
           tray_icon::set_ohos_app(ohos_app.clone());
